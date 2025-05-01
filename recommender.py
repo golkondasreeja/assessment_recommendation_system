@@ -1,174 +1,207 @@
-from typing import List, Dict, Optional
-import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import re
-from dataclasses import dataclass
-import json
+import numpy as np
+import pandas as pd
+from typing import List, Dict, Optional
+from pydantic import BaseModel
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-@dataclass
-class Product:
+class Product(BaseModel):
     name: str
-    description: str
     url: str
-    # Default values for optional fields
-    remote_testing_support: bool = False
-    adaptive_irt_support: bool = False
-    duration: Optional[str] = None
-    test_type: Optional[str] = None
-    features: List[str] = None
-    benefits: List[str] = None
-    specifications: Dict[str, str] = None
-    
-    def __post_init__(self):
-        # Initialize empty lists/dicts if None
-        if self.features is None:
-            self.features = []
-        if self.benefits is None:
-            self.benefits = []
-        if self.specifications is None:
-            self.specifications = {}
 
 class ProductRecommender:
     def __init__(self, products: List[Product]):
         self.products = products
         self.vectorizer = TfidfVectorizer(
             stop_words='english',
-            ngram_range=(1, 2),
-            max_features=5000
+            ngram_range=(1, 2),  # Include bigrams
+            max_features=1000
         )
-        self._prepare_data()
-    
-    def _prepare_data(self):
-        """Prepare product data for vectorization"""
-        self.product_texts = []
+        self.name_vectors = self._create_name_vectors()
+        
+    def _create_name_vectors(self) -> Dict[str, np.ndarray]:
+        """Create TF-IDF vectors for product names and descriptions"""
+        # Create enhanced product texts
+        product_texts = []
         for product in self.products:
-            text = f"{product.name} {product.description} "
-            text += " ".join(product.features) + " "
-            text += " ".join(product.benefits) + " "
-            text += " ".join(product.specifications.values()) + " "
-            if product.test_type:
-                text += f"test type: {product.test_type} "
-            if product.duration:
-                text += f"duration: {product.duration} "
-            if product.remote_testing_support:
-                text += "remote testing supported "
-            if product.adaptive_irt_support:
-                text += "adaptive testing supported "
-            self.product_texts.append(text)
+            # Combine name with domain-specific keywords
+            text = f"{product.name} {product.name} "  # Give more weight to name
+            
+            # Add domain-specific keywords based on product name
+            if "assessment" in product.name.lower():
+                text += "test evaluation exam skills competency remote online "
+            elif "360" in product.name:
+                text += "feedback review evaluation performance peer manager "
+            elif "hackathon" in product.name.lower():
+                text += "coding programming technical IT developer engineer "
+            elif "product catalog" in product.name.lower():
+                text += "browse search find cognitive ability personality behavior skills assessment test adaptive irt "
+            
+            product_texts.append(text.lower())
         
-        self.tfidf_matrix = self.vectorizer.fit_transform(self.product_texts)
+        # Create TF-IDF vectors
+        name_vectors = self.vectorizer.fit_transform(product_texts)
+        
+        # Convert to dictionary
+        return {product.name: vector.toarray()[0] 
+                for product, vector in zip(self.products, name_vectors)}
     
-    def _extract_requirements(self, query: str) -> Dict:
-        """Extract specific requirements from the natural language query"""
-        requirements = {
-            'remote_testing': False,
-            'adaptive_testing': False,
-            'test_type': None,
-            'max_duration': None,
-            'keywords': []
+    def _parse_query(self, query: str) -> Dict[str, str]:
+        """Parse the query string into components"""
+        # Default values
+        result = {
+            'test_type': '',
+            'delivery_mode': '',
+            'target_audience': '',
+            'duration': '',
+            'features': set()
         }
         
-        # Check for remote testing requirement
-        if re.search(r'remote|online|virtual|web-based', query.lower()):
-            requirements['remote_testing'] = True
+        query_lower = query.lower()
         
-        # Check for adaptive testing requirement
-        if re.search(r'adaptive|irt|item response theory', query.lower()):
-            requirements['adaptive_testing'] = True
-        
-        # Extract test type
+        # Test types
         test_types = {
-            'personality': ['personality', 'behavioral', 'trait'],
+            'personality': ['personality', 'behavioral', 'behaviour'],
             'cognitive': ['cognitive', 'ability', 'intelligence', 'iq'],
-            'skills': ['skill', 'competency', 'knowledge'],
-            'situational': ['situational', 'judgment', 'scenario']
+            'skills': ['skill', 'competency', 'assessment'],
+            'technical': ['technical', 'coding', 'programming', 'it']
         }
+        
         for test_type, keywords in test_types.items():
-            if any(keyword in query.lower() for keyword in keywords):
-                requirements['test_type'] = test_type
+            if any(keyword in query_lower for keyword in keywords):
+                result['test_type'] = test_type
                 break
         
-        # Extract duration requirement
-        duration_match = re.search(r'(\d+)\s*(?:minute|min|hour|hr)s?', query.lower())
+        # Delivery mode
+        if any(word in query_lower for word in ['remote', 'online', 'virtual', 'web']):
+            result['delivery_mode'] = 'remote'
+        elif any(word in query_lower for word in ['onsite', 'in-person', 'local']):
+            result['delivery_mode'] = 'onsite'
+        
+        # Target audience
+        audiences = {
+            'it': ['it', 'developer', 'programmer', 'technical', 'engineer'],
+            'professional': ['professional', 'manager', 'leader', 'executive'],
+            'general': ['employee', 'candidate', 'individual']
+        }
+        
+        for audience, keywords in audiences.items():
+            if any(keyword in query_lower for keyword in keywords):
+                result['target_audience'] = audience
+                break
+        
+        # Duration
+        duration_match = re.search(r'(\d+)\s*(?:minute|min|hour)s?', query_lower)
         if duration_match:
-            requirements['max_duration'] = int(duration_match.group(1))
+            result['duration'] = duration_match.group(1)
         
-        # Extract other keywords
-        words = query.lower().split()
-        requirements['keywords'] = [word for word in words if len(word) > 3]
+        # Features
+        feature_keywords = {
+            'adaptive': ['adaptive', 'irt', 'item response'],
+            'feedback': ['feedback', '360', 'review'],
+            'remote': ['remote', 'online', 'virtual'],
+            'technical': ['coding', 'programming', 'technical']
+        }
         
-        return requirements
+        for feature, keywords in feature_keywords.items():
+            if any(keyword in query_lower for keyword in keywords):
+                result['features'].add(feature)
+        
+        return result
     
-    def _filter_by_requirements(self, requirements: Dict) -> List[int]:
-        """Filter products based on specific requirements"""
-        valid_indices = []
-        
-        for i, product in enumerate(self.products):
-            if requirements['remote_testing'] and not product.remote_testing_support:
-                continue
-            if requirements['adaptive_testing'] and not product.adaptive_irt_support:
-                continue
-            if requirements['test_type'] and product.test_type != requirements['test_type']:
-                continue
-            if requirements['max_duration']:
-                duration_match = re.search(r'(\d+)', product.duration or '')
-                if duration_match and int(duration_match.group(1)) > requirements['max_duration']:
-                    continue
-            valid_indices.append(i)
-        
-        return valid_indices
+    def _calculate_similarity(self, query_vector: np.ndarray, product_vector: np.ndarray) -> float:
+        """Calculate cosine similarity between query and product vectors"""
+        epsilon = 1e-10
+        return np.dot(query_vector, product_vector) / (
+            np.linalg.norm(query_vector) * np.linalg.norm(product_vector) + epsilon
+        )
     
-    def recommend(self, query: str, top_k: int = 5) -> List[Dict]:
-        """
-        Recommend products based on a natural language query
+    def _match_attributes(self, query_components: Dict[str, str], product: Product) -> float:
+        """Calculate attribute matching score"""
+        score = 0.0
+        weights = {
+            'test_type': 0.3,
+            'delivery_mode': 0.2,
+            'target_audience': 0.2,
+            'duration': 0.1,
+            'features': 0.2
+        }
         
-        Args:
-            query: Natural language query describing requirements
-            top_k: Number of recommendations to return
+        product_name_lower = product.name.lower()
+        
+        # Test type matching
+        if query_components['test_type']:
+            if query_components['test_type'] == 'technical' and 'hackathon' in product_name_lower:
+                score += weights['test_type']
+            elif query_components['test_type'] in ['personality', 'cognitive', 'skills']:
+                if 'assessment' in product_name_lower:
+                    score += weights['test_type'] * 0.8  # General assessments
+                if 'product catalog' in product_name_lower:
+                    score += weights['test_type']  # Product catalog is best for specific test types
+        
+        # Delivery mode matching
+        if query_components['delivery_mode'] == 'remote':
+            if 'assessment' in product_name_lower:
+                score += weights['delivery_mode']
+            if 'product catalog' in product_name_lower:
+                score += weights['delivery_mode'] * 0.5  # Some catalog items may be remote
+        
+        # Target audience matching
+        if query_components['target_audience']:
+            if query_components['target_audience'] == 'it' and 'hackathon' in product_name_lower:
+                score += weights['target_audience']
+            elif query_components['target_audience'] in ['professional', 'general']:
+                if 'assessment' in product_name_lower:
+                    score += weights['target_audience']
+                if 'product catalog' in product_name_lower:
+                    score += weights['target_audience'] * 0.8  # Catalog has role-specific tests
+        
+        # Feature matching
+        if query_components['features']:
+            matching_features = 0
+            total_features = len(query_components['features'])
             
-        Returns:
-            List of dictionaries containing product recommendations with scores
-        """
-        # Extract requirements from query
-        requirements = self._extract_requirements(query)
-        
-        # Filter products based on requirements
-        valid_indices = self._filter_by_requirements(requirements)
-        
-        if not valid_indices:
-            return []
-        
-        # Vectorize query
-        query_vector = self.vectorizer.transform([query])
-        
-        # Calculate similarity scores for valid products
-        valid_matrix = self.tfidf_matrix[valid_indices]
-        similarity_scores = cosine_similarity(query_vector, valid_matrix).flatten()
-        
-        # Get top k recommendations
-        top_indices = similarity_scores.argsort()[-top_k:][::-1]
-        
-        recommendations = []
-        for idx in top_indices:
-            product_idx = valid_indices[idx]
-            product = self.products[product_idx]
-            score = float(similarity_scores[idx])
+            for feature in query_components['features']:
+                if feature == 'technical' and 'hackathon' in product_name_lower:
+                    matching_features += 1
+                elif feature == 'feedback' and '360' in product_name_lower:
+                    matching_features += 1
+                elif feature in ['remote', 'adaptive']:
+                    if 'assessment' in product_name_lower:
+                        matching_features += 1
+                    if 'product catalog' in product_name_lower and feature == 'adaptive':
+                        matching_features += 1  # Product catalog specifically mentions adaptive tests
             
-            recommendations.append({
-                'product': product,
-                'score': score,
-                'match_details': {
-                    'remote_testing_match': requirements['remote_testing'] == product.remote_testing_support,
-                    'adaptive_testing_match': requirements['adaptive_testing'] == product.adaptive_irt_support,
-                    'test_type_match': requirements['test_type'] == product.test_type,
-                    'duration_match': True if not requirements['max_duration'] else (
-                        re.search(r'(\d+)', product.duration or '').group(1) <= requirements['max_duration']
-                    )
-                }
-            })
+            if total_features > 0:
+                score += weights['features'] * (matching_features / total_features)
         
-        return recommendations
+        return score
+    
+    def recommend(self, query: str, top_n: int = 5) -> List[Product]:
+        """Recommend products based on query"""
+        # Parse query into components
+        query_components = self._parse_query(query)
+        
+        # Create query vector using the same vectorizer
+        query_vector = self.vectorizer.transform([query]).toarray()[0]
+        
+        # Calculate scores for each product
+        scores = []
+        for product in self.products:
+            # Get product vector
+            product_vector = self.name_vectors.get(product.name, np.zeros_like(query_vector))
+            
+            # Calculate similarity scores
+            name_similarity = self._calculate_similarity(query_vector, product_vector)
+            attribute_score = self._match_attributes(query_components, product)
+            
+            # Combine scores (weighted average)
+            final_score = 0.6 * name_similarity + 0.4 * attribute_score
+            scores.append((product, final_score))
+        
+        # Sort by score and return top N
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return [product for product, _ in scores[:top_n]]
 
 def load_products_from_csv(csv_path: str) -> List[Product]:
     """Load products from a CSV file"""
@@ -176,10 +209,8 @@ def load_products_from_csv(csv_path: str) -> List[Product]:
     products = []
     
     for _, row in df.iterrows():
-        # Create product with only the available fields
         product = Product(
             name=row['Name'],
-            description=row['Description'],
             url=row['URL']
         )
         products.append(product)
@@ -187,28 +218,23 @@ def load_products_from_csv(csv_path: str) -> List[Product]:
     return products
 
 def main():
-    # Example usage
+    """Main function for testing the recommender"""
+    # Load products
     products = load_products_from_csv('shl_products.csv')
     recommender = ProductRecommender(products)
     
-    # Example queries
-    queries = [
-        "I need a remote personality test that takes less than 30 minutes",
-        "Looking for an adaptive cognitive ability test",
-        "Show me skills assessment tests with remote testing support"
-    ]
+    # Test query
+    query = "I need a remote personality test that takes less than 30 minutes"
+    print(f"\nQuery: {query}")
     
-    for query in queries:
-        print(f"\nQuery: {query}")
-        recommendations = recommender.recommend(query)
-        
-        for i, rec in enumerate(recommendations, 1):
-            print(f"\n{i}. {rec['product'].name}")
-            print(f"Score: {rec['score']:.2f}")
-            print(f"URL: {rec['product'].url}")
-            print("Match Details:")
-            for key, value in rec['match_details'].items():
-                print(f"  - {key}: {value}")
+    # Get recommendations
+    recommendations = recommender.recommend(query)
+    
+    # Print recommendations
+    print("\nTop recommendations:")
+    for i, rec in enumerate(recommendations, 1):
+        print(f"\n{i}. {rec.name}")
+        print(f"URL: {rec.url}")
 
 if __name__ == "__main__":
     main() 
