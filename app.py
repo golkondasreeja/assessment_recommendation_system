@@ -1,83 +1,95 @@
-import streamlit as st
-from recommender import ProductRecommender, load_products_from_csv
+from flask import Flask, request, jsonify
+from pydantic import BaseModel, ValidationError
+from typing import List, Optional
+from recommender import load_products_from_csv, ProductRecommender
+import logging
+import sys
 
-# Set page config
-st.set_page_config(
-    page_title="SHL Product Recommender",
-    page_icon="🎯",
-    layout="wide"
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
 )
+logger = logging.getLogger(__name__)
 
-# Add title and description
-st.title("🎯 SHL Product Recommender")
-st.markdown("""
-This app helps you find the most suitable SHL products based on your requirements.
-Simply describe what you're looking for in natural language, and we'll recommend the best products for you.
-""")
+app = Flask(__name__)
 
-# Load products and initialize recommender
-@st.cache_data
-def load_recommender():
+class RecommendationRequest(BaseModel):
+    query: str
+    top_k: Optional[int] = 5
+
+class ProductResponse(BaseModel):
+    name: str
+    url: str
+    score: float
+
+class RecommendationResponse(BaseModel):
+    recommendations: List[ProductResponse]
+
+# Initialize recommender
+try:
+    logger.info("Initializing recommender...")
     products = load_products_from_csv('shl_products.csv')
-    return ProductRecommender(products)
+    recommender = ProductRecommender(products)
+    logger.info(f"Recommender initialized successfully with {len(products)} products!")
+except Exception as e:
+    logger.error(f"Error initializing recommender: {e}")
+    products = []
+    recommender = None
 
-recommender = load_recommender()
+@app.route("/")
+def root():
+    logger.info("Received request to root endpoint")
+    return jsonify({"message": "Welcome to SHL Product Recommender API"})
 
-# Create input form
-with st.form("recommendation_form"):
-    query = st.text_area(
-        "Describe what you're looking for:",
-        placeholder="e.g., I need a remote personality test that takes less than 30 minutes",
-        help="Be as specific as possible about your requirements"
-    )
-    
-    num_recommendations = st.slider(
-        "Number of recommendations:",
-        min_value=1,
-        max_value=5,
-        value=3
-    )
-    
-    submitted = st.form_submit_button("Get Recommendations")
+@app.route("/health")
+def health_check():
+    logger.info("Received request to health endpoint")
+    status = "ok" if recommender is not None else "error"
+    return jsonify({
+        "status": status,
+        "recommender_initialized": recommender is not None,
+        "num_products": len(products) if products else 0
+    })
 
-# Display recommendations when form is submitted
-if submitted and query:
-    st.subheader("Recommended Products")
+@app.route("/recommend", methods=["POST"])
+def get_recommendations():
+    logger.info("Received request to recommend endpoint")
     
-    # Get recommendations
-    recommendations = recommender.recommend(query, top_n=num_recommendations)
+    if not recommender:
+        logger.error("Recommender not initialized")
+        return jsonify({"error": "Recommender not initialized"}), 500
     
-    # Display each recommendation
-    for i, product in enumerate(recommendations, 1):
-        with st.expander(f"{i}. {product.name}", expanded=True):
-            st.markdown(f"**URL:** [{product.url}]({product.url})")
+    try:
+        data = request.get_json()
+        if not data:
+            logger.warning("No JSON data provided in request")
+            return jsonify({"error": "No JSON data provided"}), 400
             
-            # Add some visual separation
-            if i < len(recommendations):
-                st.divider()
-
-# Add sidebar with example queries
-with st.sidebar:
-    st.header("Example Queries")
-    st.markdown("Try these example queries:")
+        request_data = RecommendationRequest(**data)
+        logger.info(f"Processing recommendation request for query: {request_data.query}")
+        
+        recommendations = recommender.recommend(request_data.query, top_k=request_data.top_k)
+        response_recommendations = [
+            ProductResponse(
+                name=rec['product'].name,
+                url=rec['product'].url,
+                score=rec['score']
+            )
+            for rec in recommendations
+        ]
+        response = RecommendationResponse(recommendations=response_recommendations)
+        logger.info(f"Found {len(response.recommendations)} recommendations")
+        return jsonify(response.dict())
     
-    examples = [
-        "I need a remote personality test that takes less than 30 minutes",
-        "Looking for an adaptive cognitive ability test",
-        "Show me skills assessment tests with remote testing support",
-        "Find tests suitable for IT professionals",
-        "Which assessments are best for sales roles"
-    ]
-    
-    for example in examples:
-        if st.button(example, key=example):
-            st.session_state.query = example
-            st.experimental_rerun()
+    except ValidationError as e:
+        logger.error(f"Validation error: {e}")
+        return jsonify({"error": "Invalid request data", "details": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error processing request: {e}")
+        return jsonify({"error": str(e)}), 500
 
-# Add footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center'>
-    <p>Powered by SHL Product Recommender</p>
-</div>
-""", unsafe_allow_html=True) 
+if __name__ == "__main__":
+    logger.info("Starting Flask server on port 5000...")
+    app.run(host="127.0.0.1", port=5000, debug=True) 
